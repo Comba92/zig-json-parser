@@ -33,6 +33,7 @@ const LexerError = error{ InvalidCharacter, InvalidNumber, UnterminatedString, I
 
 const Lexer = struct {
     text: []const u8,
+    tokens: std.ArrayList(Token) = std.ArrayList(Token).init(allocator),
     current_char: usize = 0,
     start_char: usize = 0,
     current_line: usize = 1,
@@ -40,6 +41,13 @@ const Lexer = struct {
 
     fn token(self: Lexer, kind: TokenType, literal: TokenTypeLiteral) Token {
         return Token{ .kind = kind, .literal = literal, .lexeme = self.consume(), .line = self.current_line, .column = self.current_column - (self.current_char - self.start_char) };
+    }
+
+    fn panic(self: Lexer, err: LexerError) LexerError {
+        printf("Lexer error {s} at Token => ", .{@errorName(err)});
+        const lastToken = self.tokens.getLastOrNull();
+        if (lastToken) |t| t.print();
+        return err;
     }
 
     fn isAtEnd(self: Lexer) bool {
@@ -79,7 +87,6 @@ const Lexer = struct {
     }
 
     pub fn scan(input: []const u8) ![]Token {
-        var tokens = std.ArrayList(Token).init(allocator);
         var lexer = Lexer{ .text = input };
 
         while (!lexer.isAtEnd()) {
@@ -108,7 +115,7 @@ const Lexer = struct {
                     if (std.ascii.isAlphanumeric(char)) {
                         break :blk TokenType.Literal;
                     }
-                    return LexerError.InvalidCharacter;
+                    return lexer.panic(LexerError.InvalidCharacter);
                 },
             };
 
@@ -119,17 +126,17 @@ const Lexer = struct {
                     } else if (std.ascii.isDigit(char) or char == '-' or char == '.') {
                         break :blk try lexer.scanNumber();
                     } else {
-                        break :blk try lexer.scanKeyword();
+                        break :blk lexer.scanKeyword();
                     }
                 },
                 else => .Null,
             };
 
             const t = lexer.token(kind, literal);
-            try tokens.append(t);
+            try lexer.tokens.append(t);
         }
 
-        return tokens.items;
+        return lexer.tokens.items;
     }
 
     fn scanString(self: *Lexer) LexerError!TokenTypeLiteral {
@@ -144,7 +151,7 @@ const Lexer = struct {
             }
         }
 
-        return LexerError.UnterminatedString;
+        return self.panic(LexerError.UnterminatedString);
     }
 
     fn scanNumber(self: *Lexer) !TokenTypeLiteral {
@@ -154,7 +161,7 @@ const Lexer = struct {
 
             if (char == '.') {
                 if (decimal) {
-                    return LexerError.InvalidNumber;
+                    return self.panic(LexerError.InvalidNumber);
                 } else decimal = true;
             } else if (!std.ascii.isDigit(char)) {
                 break;
@@ -164,11 +171,13 @@ const Lexer = struct {
         }
 
         const str = self.consume();
-        const num = try std.fmt.parseFloat(f64, str);
+        const num = std.fmt.parseFloat(f64, str) catch |err| {
+            return self.panic(err);
+        };
         return .{ .Number = num };
     }
 
-    fn scanKeyword(self: *Lexer) !TokenTypeLiteral {
+    fn scanKeyword(self: *Lexer) TokenTypeLiteral {
         while (!self.isAtEnd()) : (_ = self.advance()) {
             if (!std.ascii.isAlphanumeric(self.current())) {
                 break;
@@ -239,6 +248,12 @@ const Parser = struct {
     start_token: usize = 0,
     current_token: usize = 0,
 
+    fn panic(self: Parser, err: ParserError) ParserError {
+        printf("Parser error {s} at Token => ", .{@errorName(err)});
+        self.current().print();
+        return err;
+    }
+
     fn isAtEnd(self: Parser) bool {
         return self.current_token >= self.tokens.len;
     }
@@ -286,7 +301,7 @@ const Parser = struct {
             },
 
             else => {
-                return ParserError.InvalidToken;
+                return self.panic(ParserError.InvalidToken);
             },
         };
 
@@ -304,7 +319,7 @@ const Parser = struct {
         while (!self.isAtEnd()) {
             const value = try self.parseValue();
             switch (value) {
-                .Key => return ParserError.InvalidKeyword,
+                .Key => return self.panic(ParserError.InvalidKeyword),
                 else => {},
             }
 
@@ -317,11 +332,11 @@ const Parser = struct {
             if (self.match(TokenType.SquareRight)) {
                 return JsonValue{ .List = list.items };
             } else if (!comma_found) {
-                return ParserError.MissingListEntrySeparator;
+                return self.panic(ParserError.MissingListEntrySeparator);
             }
         }
 
-        return ParserError.UnterminatedList;
+        return self.panic(ParserError.UnterminatedList);
     }
 
     fn parseObject(self: *Parser) !JsonValue {
@@ -336,23 +351,23 @@ const Parser = struct {
             const maybeKey = try self.parseValue();
             const key = switch (maybeKey) {
                 .Number => |num| std.fmt.allocPrint(allocator, "{d}", .{num}) catch {
-                    return ParserError.InvalidObjectKey;
+                    return self.panic(ParserError.InvalidObjectKey);
                 },
                 .String => |str| str[1 .. str.len - 1],
                 .Key => |str| str,
                 .Bool => |b| std.fmt.allocPrint(allocator, "{}", .{b}) catch {
-                    return ParserError.InvalidObjectKey;
+                    return self.panic(ParserError.InvalidObjectKey);
                 },
-                else => return ParserError.InvalidObjectKey,
+                else => return self.panic(ParserError.InvalidObjectKey),
             };
 
             if (!self.match(TokenType.Colon)) {
-                return ParserError.MissingKeyValueSeparator;
+                return self.panic(ParserError.MissingKeyValueSeparator);
             }
 
             const value = try self.parseValue();
             switch (value) {
-                .Key => return ParserError.InvalidKeyword,
+                .Key => return self.panic(ParserError.InvalidKeyword),
                 else => {},
             }
 
@@ -366,11 +381,11 @@ const Parser = struct {
             if (self.match(TokenType.CurlyRight)) {
                 return JsonValue{ .Object = list.items };
             } else if (!comma_found) {
-                return ParserError.MissingObjectEntrySeparator;
+                return self.panic(ParserError.MissingObjectEntrySeparator);
             }
         }
 
-        return ParserError.UnterminatedObject;
+        return self.panic(ParserError.UnterminatedObject);
     }
 };
 
@@ -388,8 +403,10 @@ pub fn main() !void {
     };
 
     const file = try std.fs.openFileAbsolute(filepath, .{});
-    const buffer = try file.readToEndAlloc(allocator, 256 * 1024);
+    const buffer = try file.readToEndAlloc(allocator, 1000 * 1000);
 
     const value = try parse_json(buffer);
     value.print();
+
+    file.close();
 }
